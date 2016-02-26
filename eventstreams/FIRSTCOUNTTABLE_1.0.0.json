@@ -1,0 +1,20 @@
+{
+  "name": "FIRSTCOUNTTABLE",
+  "version": "1.0.0",
+  "nickName": "",
+  "description": "",
+  "payloadData": [
+    {
+      "name": "firstState",
+      "type": "STRING"
+    },
+    {
+      "name": "consumerKey",
+      "type": "STRING"
+    },
+    {
+      "name": "count",
+      "type": "DOUBLE"
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+/* Enter a unique ExecutionPlan */
+@Plan:name('MarkovMissProbabilityMetric')
+
+/* Enter a unique description for ExecutionPlan */
+-- @Plan:description('ExecutionPlan')
+
+/* define streams/tables and write queries here ... */
+
+
+
+
+@Import('StateStream:1.0.0')
+define stream metStream (context string, method string, resourcePath string, state string, userid string, timestamp string, consumerKey string);
+
+@Export('FraudStream:1.0.0')
+define stream FraudStream (userid string, timestamp string, transition string, miss_probability double, consumerKey string);
+
+@from(eventtable = 'analytics.table' , table.name = 'MARKOVMODELTABLE', primary.keys='firstState,nextState, consumconsumerKey', indices = 'firstState,nextState, count, probability, consumerKey')
+define table MarkovModelTable (consumerKey string, firstState string, nextState string, count double, probability double);
+
+from every ta = metStream ->
+tb = metStream[(userid == ta.userid) and (consumerKey == ta.consumerKey)] within 1 hour
+select tb.userid, tb.timestamp, ta.state as firstState, tb.state as nextState, ta.consumerKey
+insert into metricStream;
+
+/****************************************************** Calculate Miss Probability *******************************************************************************/
+from metricStream[not((firstState == MarkovModelTable.firstState and nextState == MarkovModelTable.nextState and consumerKey == MarkovModelTable.consumerKey) in MarkovModelTable)]
+select userid, timestamp, firstState , nextState, 1.0 as MissProbability, MarkovModelTable.consumerKey
+insert into metricValueStream;
+
+from metricStream as ms join MarkovModelTable
+on (ms.firstState == MarkovModelTable.firstState and ms.nextState == MarkovModelTable.nextState and ms.consumerKey == MarkovModelTable.consumerKey)
+select ms.userid, ms.timestamp, ms.firstState ,ms.nextState, (1- MarkovModelTable.probability) as MissProbability, MarkovModelTable.consumerKey
+insert into metricValueStream;
+ 
+
+/****************************************************** Normalize Miss Probability ******************************************************************************/
+from metricValueStream#window.length(1)
+select userid, timestamp, firstState, nextState, avg (MissProbability) as NormalizeMissProbability, consumerKey, '2016-02-24' as startAlertingDate
+insert into NormalizeMissProbabilityStream;
+
+/****************************************************** Compare Normalize Miss Probability with Threshold *******************************************************/
+from NormalizeMissProbabilityStream [ NormalizeMissProbability > 0.95 and time:dateDiff(time:currentDate(),startAlertingDate,'yyyy-MM-dd','yyyy-MM-dd') > 0]
+select userid, timestamp, str:concat(firstState,'_to_',nextState) as transition, NormalizeMissProbability as miss_probability, consumerKey
+insert into FraudStream;

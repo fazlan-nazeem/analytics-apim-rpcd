@@ -1,0 +1,28 @@
+{
+  "name": "MARKOVMODELTABLE",
+  "version": "1.0.0",
+  "nickName": "",
+  "description": "",
+  "payloadData": [
+    {
+      "name": "consumerKey",
+      "type": "STRING"
+    },
+    {
+      "name": "firstState",
+      "type": "STRING"
+    },
+    {
+      "name": "nextState",
+      "type": "STRING"
+    },
+    {
+      "name": "count",
+      "type": "DOUBLE"
+    },
+    {
+      "name": "probability",
+      "type": "DOUBLE"
+    }
+  ]
+}
