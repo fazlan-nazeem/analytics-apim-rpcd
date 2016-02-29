@@ -28,7 +28,7 @@
 @Import('StateStream:1.0.0')
 define stream StateStream (context string, method string, resourcePath string, state string, userid string, timestamp string, consumerKey string);
 
-@from(eventtable = 'analytics.table' , table.name = 'FIRSTCOUNTTABLE',  primary.keys = 'firstState,consumerKey', indices = 'firstState, count')
+@from(eventtable = 'analytics.table' , table.name = 'FIRSTCOUNTTABLE',  primary.keys = 'firstState,consumerKey', indices = 'firstState, count, consumerKey')
 define table firstCountTable (firstState string, consumerKey string, count double);
 
 @from(eventtable = 'analytics.table' , table.name = 'MARKOVMODELTABLE',  primary.keys = 'consumerKey.firstState,nextState', indices = 'firstState,nextState, count, probability, consumerKey')
