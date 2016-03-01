@@ -1,0 +1,343 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!--
+  ~ Copyright (c) 2015, WSO2 Inc. (http://www.wso2.org) All Rights Reserved.
+  ~
+  ~ Licensed under the Apache License, Version 2.0 (the "License");
+  ~ you may not use this file except in compliance with the License.
+  ~ You may obtain a copy of the License at
+  ~
+  ~     http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing, software
+  ~ distributed under the License is distributed on an "AS IS" BASIS,
+  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  ~ See the License for the specific language governing permissions and
+  ~ limitations under the License.
+  -->
+<templateDomain name="APIRequestPatternChangeAnalysis">
+    <description>This template domain is to configure parameters for request pattern change detection</description>
+    <templates>
+        <template name="Markov-MatrixBuilder">
+            <description>To configure Markov Matrix parameters</description>
+            <executionPlan>
+                <![CDATA[
+               /* Enter a unique ExecutionPlan */
+@Plan:name('MarkovMatrixBuilder')
+
+@Import('StateStream:1.0.0')
+define stream StateStream (context string, method string, resourcePath string, state string, userid string, timestamp string, consumerKey string);
+
+@from(eventtable = 'analytics.table' , table.name = 'FIRSTCOUNTTABLE',  primary.keys = 'firstState,consumerKey', indices = 'firstState, count, consumerKey')
+define table firstCountTable (firstState string, consumerKey string, count double);
+
+@from(eventtable = 'analytics.table' , table.name = 'MARKOVMODELTABLE',  primary.keys = 'consumerKey.firstState,nextState', indices = 'firstState,nextState, count, probability, consumerKey')
+define table MarkovModelTable (consumerKey string, firstState string, nextState string, count double, probability double);
+
+
+
+from every a = StateStream -> b = StateStream[(userid == a.userid) and (consumerKey == a.consumerKey)] within $transition_time
+select a.state as firstState, b.state as nextState, a.consumerKey as consumerKey
+insert into transitionStream;
+
+
+/* ====== update count in firstcount table ======= */
+from transitionStream[not((firstState==firstCountTable.firstState and consumerKey == firstCountTable.consumerKey) in firstCountTable)]
+select firstState as firstState, consumerKey, 0.0 as count
+insert into firstCountTable;
+
+from transitionStream as t join firstCountTable
+on (firstState == firstCountTable.firstState and consumerKey == firstCountTable.consumerKey)
+select t.firstState, t.consumerKey, (firstCountTable.count+1) as count
+insert into FirstCountUpdateStream;
+
+from FirstCountUpdateStream
+update firstCountTable
+on (firstState==firstCountTable.firstState and consumerKey == firstCountTable.consumerKey);
+
+
+/* ====== update count in markovmodel table ========= */
+from transitionStream[not((firstState==MarkovModelTable.firstState and nextState == MarkovModelTable.nextState and consumerKey == MarkovModelTable.consumerKey) in MarkovModelTable)]
+select consumerKey, firstState, nextState, 0.0 as count, 0.0 as probability
+insert into MarkovModelTable;
+
+from transitionStream as t join MarkovModelTable
+on (t.firstState == MarkovModelTable.firstState and t.nextState == MarkovModelTable.nextState and t.consumerKey == MarkovModelTable.consumerKey)
+select t.firstState,t.nextState, t.consumerKey, (count+1) as count
+insert into mUpdateStream;
+
+from mUpdateStream
+update MarkovModelTable
+on (firstState == MarkovModelTable.firstState and nextState == MarkovModelTable.nextState and consumerKey == MarkovModelTable.consumerKey);
+
+/* == correlate firstcount table and markovmodel table == */
+from transitionStream as t join firstCountTable
+on (t.firstState == firstCountTable.firstState and t.consumerKey == firstCountTable.consumerKey)
+select t.firstState, t.nextState, t.consumerKey, firstCountTable.count
+insert into temp;
+
+from temp as t join MarkovModelTable
+on (t.firstState == MarkovModelTable.firstState and t.consumerKey == MarkovModelTable.consumerKey)
+select MarkovModelTable.nextState, MarkovModelTable.consumerKey, MarkovModelTable.firstState, MarkovModelTable.count, t.count as firstCount, (MarkovModelTable.count/t.count) as probability
+insert into tempStream;
+
+from tempStream
+select nextState, consumerKey, firstState, count, probability
+insert into MarkovUpdateStream;
+
+/* ==== update all rows with same transistion ====*/
+from MarkovUpdateStream
+update MarkovModelTable
+on (firstState == MarkovModelTable.firstState and nextState == MarkovModelTable.nextState and consumerKey == MarkovModelTable.consumerKey);
+                 ]]>
+            </executionPlan>
+            <parameters>
+                <parameter name="transition_time" type="time">
+                    <displayName>Transition time duration</displayName>
+                    <description>The time period for two api transitions.</description>
+                    <defaultValue>60 min</defaultValue>
+                </parameter>
+            </parameters>
+        </template>
+
+        <template name="Markov-MissProbabilityMetric">
+            <description>To configure miss probability metric parameters</description>
+            <executionPlan>
+                <![CDATA[
+     
+@Plan:name('MarkovMissProbabilityMetric')
+
+
+@Import('StateStream:1.0.0')
+define stream metStream (context string, method string, resourcePath string, state string, userid string, timestamp string, consumerKey string);
+
+
+@Export('FraudStream:1.0.0')
+define stream FraudStream (userid string, consumerKey string, message string);
+
+@from(eventtable = 'analytics.table' , table.name = 'MARKOVMODELTABLE', primary.keys='firstState,nextState, consumerKey', indices = 'firstState,nextState, count, probability, consumerKey')
+define table MarkovModelTable (consumerKey string, firstState string, nextState string, count double, probability double);
+
+from every ta = metStream ->
+tb = metStream[(userid == ta.userid) and (consumerKey == ta.consumerKey)] within $transition_time
+select tb.userid, tb.timestamp, ta.state as firstState, tb.state as nextState, ta.consumerKey
+insert into metricStream;
+
+/****************************************************** Calculate Miss Probability *******************************************************************************/
+from metricStream[not((firstState == MarkovModelTable.firstState and nextState == MarkovModelTable.nextState and consumerKey == MarkovModelTable.consumerKey) in MarkovModelTable)]
+select userid, timestamp, firstState , nextState, 1.0 as MissProbability, MarkovModelTable.consumerKey
+insert into metricValueStream;
+
+from metricStream as ms join MarkovModelTable
+on (ms.firstState == MarkovModelTable.firstState and ms.nextState == MarkovModelTable.nextState and ms.consumerKey == MarkovModelTable.consumerKey)
+select ms.userid, ms.timestamp, ms.firstState ,ms.nextState, (1- MarkovModelTable.probability) as MissProbability, MarkovModelTable.consumerKey
+insert into metricValueStream;
+ 
+
+/****************************************************** Normalize Miss Probability ******************************************************************************/
+from metricValueStream#window.length($api_count)
+select userid, timestamp, firstState, nextState, avg (MissProbability) as NormalizeMissProbability, consumerKey, "$startAlertingDate" as startAlertingDate
+insert into NormalizeMissProbabilityStream;
+
+/****************************************************** Compare Normalize Miss Probability with Threshold *******************************************************/
+from NormalizeMissProbabilityStream [ NormalizeMissProbability > $threshold and time:dateDiff(time:currentDate(),"$startAlertingDate",'yyyy-MM-dd','yyyy-MM-dd') >= 0]
+select userid, timestamp, str:concat(firstState,'_to_',nextState) as transition, NormalizeMissProbability as miss_probability, consumerKey
+insert into IntermediateFraudStream;
+
+from IntermediateFraudStream 
+select userid, consumerKey, transition as message 
+insert into FraudStream;
+                 ]]>
+            </executionPlan>
+            <parameters>
+
+                <parameter name="transition_time" type="time">
+                    <displayName>Transition time duration</displayName>
+                    <description>The time period for two api transitions. Use the same value given for MatrixBuilder configuration.</description>
+                    <defaultValue>60 min</defaultValue>
+                </parameter>
+         
+                <parameter name="startAlertingDate" type="string">
+                    <displayName>The date to start alerting</displayName>
+                    <description>The time period between today's date and above date will be taken as training period in 'yyyy-MM-dd' format.</description>
+                    <defaultValue>2016-03-02</defaultValue>
+                </parameter>
+
+
+                <parameter name="api_count" type="int">
+                    <displayName>Usual number of API transitions</displayName>
+                    <description>The usual number of apis used for this application.</description>
+                    <defaultValue>1</defaultValue>
+                </parameter>
+
+		<parameter name="threshold" type="double">
+                    <displayName>Miss Probability Threshold</displayName>
+                    <description>Enter a value between 0 and 1.</description>
+                    <defaultValue>0.95</defaultValue>
+                </parameter>
+            </parameters>
+        </template>
+
+
+    </templates>
+    <streams>
+
+    	<stream>
+{
+  "streamId": "StateStream:1.0.0",
+  "name": "StateStream",
+  "version": "1.0.0",
+  "nickName": "",
+  "description": "",
+  "metaData": [],
+  "correlationData": [],
+  "payloadData": [
+    {
+      "name": "context",
+      "type": "STRING"
+    },
+    {
+      "name": "method",
+      "type": "STRING"
+    },
+    {
+      "name": "resourcePath",
+      "type": "STRING"
+    },
+    {
+      "name": "state",
+      "type": "STRING"
+    },
+    {
+      "name": "userid",
+      "type": "STRING"
+    },
+    {
+      "name": "timestamp",
+      "type": "STRING"
+    },
+    {
+      "name": "consumerKey",
+      "type": "STRING"
+    }
+  ]
+}
+        </stream>
+
+        <stream>
+{
+  "streamId": "FraudStream:1.0.0",
+  "name": "FraudStream",
+  "version": "1.0.0",
+  "nickName": "",
+  "description": "",
+  "metaData": [],
+  "correlationData": [],
+  "payloadData": [
+    {
+      "name": "userid",
+      "type": "STRING"
+    },
+    {
+      "name": "consumerKey",
+      "type": "STRING"
+    },
+    {
+      "name": "message",
+      "type": "STRING"
+    }
+  ]
+}
+     </stream>
+      
+     <stream>
+{
+  "name": "org.wso2.apimgt.statistics.request",
+  "version": "1.0.0",
+  "nickName": "API Manager Request Data",
+  "description": "Request Data",
+  "metaData": [
+    {
+      "name": "clientType",
+      "type": "STRING"
+    }
+  ],
+  "payloadData": [
+    {
+      "name": "consumerKey",
+      "type": "STRING"
+    },
+    {
+      "name": "context",
+      "type": "STRING"
+    },
+    {
+      "name": "api_version",
+      "type": "STRING"
+    },
+    {
+      "name": "api",
+      "type": "STRING"
+    },
+    {
+      "name": "resourcePath",
+      "type": "STRING"
+    },
+    {
+      "name": "method",
+      "type": "STRING"
+    },
+    {
+      "name": "version",
+      "type": "STRING"
+    },
+    {
+      "name": "request",
+      "type": "INT"
+    },
+    {
+      "name": "requestTime",
+      "type": "LONG"
+    },
+    {
+      "name": "userId",
+      "type": "STRING"
+    },
+    {
+      "name": "tenantDomain",
+      "type": "STRING"
+    },
+    {
+      "name": "hostName",
+      "type": "STRING"
+    },
+    {
+      "name": "apiPublisher",
+      "type": "STRING"
+    },
+    {
+      "name": "applicationName",
+      "type": "STRING"
+    },
+    {
+      "name": "applicationId",
+      "type": "STRING"
+    },
+    {
+      "name": "userAgent",
+      "type": "STRING"
+    },
+    {
+      "name": "tier",
+      "type": "STRING"
+    },
+    {
+      "name": "throttledOut",
+      "type": "BOOL"
+    }
+  ]
+}					                                    		
+        </stream>
+        
+    </streams>
+</templateDomain>
